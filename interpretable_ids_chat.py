@@ -54,6 +54,47 @@ class InterpretableIDSChat:
 
         self._load_and_index_knowledge_base()
 
+    def _enforce_family_consistency(self, text: str, pipeline_context: Dict) -> str:
+        binary_label = str(pipeline_context.get("binary_label", "unknown")).lower()
+        predicted_family = str(pipeline_context.get("attack_name", "Unknown"))
+
+        if binary_label == "normal":
+            return text
+
+        aliases = {
+            "Fuzzers": ["fuzzer", "fuzzers", "fuzzing"],
+            "Analysis": ["analysis"],
+            "Backdoors": ["backdoor", "backdoors"],
+            "DoS": ["dos", "denial of service", "denial-of-service"],
+            "Exploits": ["exploit", "exploits", "exploitation"],
+            "Generic": ["generic"],
+            "Reconnaissance": ["recon", "reconnaissance"],
+            "Shellcode": ["shellcode"],
+            "Worms": ["worm", "worms"],
+            "Normal": ["normal", "benign"],
+        }
+
+        predicted_aliases = set(a.lower() for a in aliases.get(predicted_family, [predicted_family]))
+        lowered = text.lower()
+
+        conflicting = []
+        for family, terms in aliases.items():
+            if family == predicted_family:
+                continue
+            for term in terms:
+                if re.search(rf"\b{re.escape(term)}\b", lowered):
+                    conflicting.append(family)
+                    break
+
+        if conflicting:
+            note = (
+                "\n\nConsistency Note: Pipeline-predicted attack family is "
+                f"`{predicted_family}`. Interpret evidence under this family unless new verified evidence appears."
+            )
+            return text + note
+
+        return text
+
     def _resolve_expected_file(self, attack_name: str) -> str:
         label_key = self._normalize_label(attack_name)
         expected_file = self._label_to_file.get(label_key)
@@ -265,6 +306,8 @@ class InterpretableIDSChat:
             temperature=0.2,
         )
 
+        summary = self._enforce_family_consistency(summary, pipeline_context)
+
         return summary, retrieved
 
     def chat_follow_up(
@@ -307,4 +350,5 @@ class InterpretableIDSChat:
         messages.append({"role": "user", "content": user_message})
 
         response = self._chat_ollama(messages=messages, temperature=0.2)
+        response = self._enforce_family_consistency(response, pipeline_context)
         return response, retrieved

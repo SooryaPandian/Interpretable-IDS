@@ -4,6 +4,7 @@ import numpy as np
 import shap
 import time
 import os
+import json
 import joblib
 import tensorflow as tf
 import matplotlib.pyplot as plt
@@ -432,6 +433,42 @@ def build_llm_pipeline_context(sample_row, vals, times):
     return context
 
 
+def render_evidence_card(llm_context):
+    st.markdown("### Evidence Card")
+
+    binary_label = str(llm_context.get("binary_label", "unknown")).lower()
+    label_bg = "#2e7d32" if binary_label == "normal" else "#c62828"
+    label_text = "NORMAL" if binary_label == "normal" else "ATTACK"
+
+    st.markdown(
+        (
+            f"<div style='display:inline-block;padding:6px 12px;border-radius:999px;"
+            f"background:{label_bg};color:white;font-weight:700;font-size:0.9rem;'>"
+            f"{label_text}</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Binary Label", str(llm_context.get("binary_label", "unknown")).upper())
+    c2.metric("Attack Probability", f"{float(llm_context.get('attack_probability', 0.0)):.4f}")
+    c3.metric("Predicted Attack", str(llm_context.get("attack_name", "Unknown")))
+    c4.metric("Cluster", str(llm_context.get("cluster", "N/A")))
+
+    shap_rows = llm_context.get("shap_feature_evidence", [])
+    if shap_rows:
+        top_rows = sorted(shap_rows, key=lambda r: abs(float(r.get("shap_value", 0.0))), reverse=True)[:5]
+        for row in top_rows:
+            row["shap_signed"] = f"{float(row.get('shap_value', 0.0)):+.6f}"
+        top_df = pd.DataFrame(top_rows)
+        top_df = top_df[["feature", "feature_value", "shap_signed"]]
+        top_df.columns = ["feature", "feature_value", "shap_value"]
+        st.caption("Top SHAP Feature Evidence")
+        st.dataframe(top_df, use_container_width=True)
+    else:
+        st.caption("Top SHAP Feature Evidence: unavailable (run Step 6 first).")
+
+
 def render_interpretable_assistant_panel(vals, times):
     st.markdown("### Interpretable IDS Assistant (RAG + Ollama)")
     st.caption("Interactive analyst chat grounded in IDS pipeline evidence + RAG knowledge.")
@@ -477,6 +514,22 @@ def render_interpretable_assistant_panel(vals, times):
             ]
         except Exception as e:
             st.error(f"AI summary generation failed: {e}")
+
+    cexp1, cexp2 = st.columns(2)
+    cexp1.download_button(
+        label="Download Chat (Markdown)",
+        data="\n\n".join(
+            [f"### {m['role'].title()}\n{m['content']}" for m in st.session_state.get("ids_chat_messages", [])]
+        ),
+        file_name=f"ids_assistant_chat_sample_{sample_index}.md",
+        mime="text/markdown",
+    )
+    cexp2.download_button(
+        label="Download Evidence (JSON)",
+        data=json.dumps(llm_context, indent=2, default=str),
+        file_name=f"ids_evidence_sample_{sample_index}.json",
+        mime="application/json",
+    )
 
     with st.expander("RAG Sources Used"):
         for src in st.session_state.get("ids_sources", []):
@@ -689,6 +742,9 @@ def render_assistant_page():
     if st.session_state.get("current_step", 0) < TOTAL_STEPS:
         st.warning("Complete all pipeline steps first, then use AI assistant.")
         return
+
+    llm_context = build_llm_pipeline_context(sample, vals, times)
+    render_evidence_card(llm_context)
 
     render_interpretable_assistant_panel(vals, times)
 
