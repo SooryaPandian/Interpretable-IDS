@@ -258,39 +258,36 @@ def attack_classification(cluster, X, emb=None):
 # ------------------------------
 
 def shap_explain(X):
-    # Build a background for SHAP (use X if it has >1 row, otherwise repeat)
-    try:
-        if X.shape[0] > 1:
-            background = X[:min(50, X.shape[0])]
-        else:
-            # fallback to using X as background (single-sample explanation)
-            background = X
 
-        # Prefer DeepExplainer for TF models when available
-        try:
-            explainer = shap.DeepExplainer(dnn, background)
-            shap_values = explainer.shap_values(X)
-        except Exception:
-            # KernelExplainer fallback (may be slower)
-            func = lambda x: dnn.predict(x).ravel()
-            explainer = shap.KernelExplainer(func, background)
-            shap_values = explainer.shap_values(X, nsamples=50)
+    # Convert input to numpy
+    X_np = np.array(X)
 
-        # Create a matplotlib figure and draw the summary into it
-        fig = plt.figure(figsize=(8, 6))
-        # shap.summary_plot expects (values, features)
-        try:
-            shap.summary_plot(shap_values, X, feature_names=selected_features, show=False)
-        except Exception:
-            # try without feature names if shapes mismatch
-            shap.summary_plot(shap_values, X, show=False)
+    # Wrapper so SHAP receives 1D output
+    def predict_fn(x):
+        return dnn.predict(x, verbose=0).flatten()
 
-        plt.tight_layout()
-        return fig
+    # Small background dataset
+    background = np.zeros((1, X_np.shape[1]))
 
-    except Exception as e:
-        # bubble up a clear error to the caller
-        raise RuntimeError(f"SHAP explanation failed: {e}")
+    explainer = shap.KernelExplainer(predict_fn, background)
+
+    shap_values = explainer.shap_values(X_np)
+
+    # Ensure numpy array
+    shap_values = np.array(shap_values)
+
+    # Build explicit matplotlib figure
+    fig, ax = plt.subplots(figsize=(10,4))
+
+    shap.bar_plot(
+        shap_values[0],
+        feature_names=selected_features,
+        max_display=15
+    )
+
+    plt.tight_layout()
+
+    return fig
 
 # ------------------------------
 # RUN PIPELINE
