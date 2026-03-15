@@ -1,0 +1,17 @@
+Class: Normal / Benign Traffic
+Definition:
+Normal traffic follows expected protocol behavior, service usage patterns, and baseline host communication profiles.
+
+Typical Indicators:
+- Feature values remain within baseline ranges for the environment
+- No strong malicious signatures in payload or flow-level attributes
+- No coordinated scan/flood/exploit progression across pipeline stages
+
+How To Interpret In IDS Context:
+- Binary model indicates low attack probability
+- Multiclass attack stage is skipped or not confidently triggered
+- SHAP highlights may still exist, but contribution magnitudes are usually low or balanced
+
+Operational Recommendation:
+- Treat as benign unless corroborating telemetry (EDR, SIEM, firewall, auth logs) suggests otherwise
+- Continue passive monitoring and baseline drift tracking

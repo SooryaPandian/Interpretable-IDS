@@ -391,11 +391,26 @@ def reset_pipeline_state():
     st.session_state.ids_summary = None
     st.session_state.ids_sources = []
     st.session_state.ids_chat_messages = []
+    st.session_state.ids_context_sig = None
+    st.session_state.show_ai_page = False
 
 
 def build_llm_pipeline_context(sample_row, vals, times):
     sample_features = sample_row[selected_features].iloc[0].to_dict()
     attack_probability = float(vals.get("attack_prob", 0.0))
+
+    shap_with_values = []
+    for item in vals.get("shap_top_features", []):
+        feat = item.get("feature")
+        shap_val = float(item.get("shap_value", 0.0))
+        raw_val = sample_features.get(feat)
+        shap_with_values.append(
+            {
+                "feature": feat,
+                "shap_value": shap_val,
+                "feature_value": raw_val,
+            }
+        )
 
     context = {
         "sample_index": int(sample_index),
@@ -406,9 +421,102 @@ def build_llm_pipeline_context(sample_row, vals, times):
         "attack_code": int(np.asarray(vals["attack"]).item()) if "attack" in vals else None,
         "step_times": {k: float(v) for k, v in times.items()},
         "shap_top_features": vals.get("shap_top_features", []),
+        "shap_feature_evidence": shap_with_values,
         "sample_feature_values": sample_features,
+        "interpretation_hints": [
+            "Use SHAP sign and magnitude to explain why each top feature pushes toward attack or normal.",
+            "Relate notable raw values to potential risk context (for example ttl/window/load style indicators).",
+            "Do not rename attack family; keep consistent with pipeline attack_name.",
+        ],
     }
     return context
+
+
+def render_interpretable_assistant_panel(vals, times):
+    st.markdown("### Interpretable IDS Assistant (RAG + Ollama)")
+    st.caption("Interactive analyst chat grounded in IDS pipeline evidence + RAG knowledge.")
+
+    clear_chat_clicked = st.button("Clear AI Chat")
+
+    if clear_chat_clicked:
+        st.session_state.ids_summary = None
+        st.session_state.ids_sources = []
+        st.session_state.ids_chat_messages = []
+        st.rerun()
+
+    llm_context = build_llm_pipeline_context(sample, vals, times)
+    context_sig = (
+        llm_context.get("sample_index"),
+        llm_context.get("binary_label"),
+        llm_context.get("attack_name"),
+        llm_context.get("attack_code"),
+    )
+
+    # Regenerate automatically if context changed or first open.
+    if st.session_state.get("ids_context_sig") != context_sig:
+        st.session_state.ids_chat_messages = []
+        st.session_state.ids_sources = []
+        st.session_state.ids_summary = None
+        st.session_state.ids_context_sig = context_sig
+
+    if not st.session_state.get("ids_chat_messages"):
+        try:
+            assistant = load_interpretable_assistant()
+            summary, retrieved = assistant.generate_initial_summary(llm_context)
+
+            st.session_state.ids_sources = [
+                {
+                    "source": r.source,
+                    "score": float(r.score),
+                    "snippet": r.text[:240],
+                }
+                for r in retrieved
+            ]
+            st.session_state.ids_chat_messages = [
+                {"role": "assistant", "content": summary}
+            ]
+        except Exception as e:
+            st.error(f"AI summary generation failed: {e}")
+
+    with st.expander("RAG Sources Used"):
+        for src in st.session_state.get("ids_sources", []):
+            st.markdown(
+                f"- `{src['source']}` (score: {src['score']:.4f})\n\n"
+                f"  {src['snippet']}..."
+            )
+
+    st.markdown("#### Chat")
+    for msg in st.session_state.get("ids_chat_messages", []):
+        with st.chat_message(msg["role"]):
+            st.write(msg["content"])
+
+    user_msg = st.chat_input("Ask follow-up about this alert, evidence, or mitigation")
+    if user_msg:
+        st.session_state.ids_chat_messages.append({"role": "user", "content": user_msg})
+        with st.chat_message("user"):
+            st.write(user_msg)
+
+        try:
+            assistant = load_interpretable_assistant()
+            answer, retrieved = assistant.chat_follow_up(
+                pipeline_context=llm_context,
+                chat_history=st.session_state.ids_chat_messages,
+                user_message=user_msg,
+            )
+            st.session_state.ids_chat_messages.append({"role": "assistant", "content": answer})
+            with st.chat_message("assistant"):
+                st.write(answer)
+
+            st.session_state.ids_sources = [
+                {
+                    "source": r.source,
+                    "score": float(r.score),
+                    "snippet": r.text[:240],
+                }
+                for r in retrieved
+            ]
+        except Exception as e:
+            st.error(f"AI follow-up failed: {e}")
 
 
 if "current_step" not in st.session_state:
@@ -560,84 +668,34 @@ def render_up_to_step(step_limit):
         st.metric("Total Pipeline Runtime", f"{total_runtime:.4f} seconds")
         st.success("Pipeline execution completed")
 
-        st.markdown("### Interpretable IDS Assistant (RAG + Ollama)")
-        st.caption("Generate an AI summary only when needed, then ask follow-up questions interactively.")
-
-        c_sum, c_clear = st.columns([1, 1])
-        generate_summary_clicked = c_sum.button("Generate AI Summary", type="primary")
-        clear_chat_clicked = c_clear.button("Clear AI Chat")
-
-        if clear_chat_clicked:
-            st.session_state.ids_summary = None
-            st.session_state.ids_sources = []
-            st.session_state.ids_chat_messages = []
+        c_open, _ = st.columns([1, 3])
+        if c_open.button("Open AI Assistant Page"):
+            st.session_state.show_ai_page = True
             st.rerun()
 
-        if generate_summary_clicked:
-            try:
-                assistant = load_interpretable_assistant()
-                llm_context = build_llm_pipeline_context(sample, vals, times)
-                summary, retrieved = assistant.generate_initial_summary(llm_context)
 
-                st.session_state.ids_summary = summary
-                st.session_state.ids_sources = [
-                    {
-                        "source": r.source,
-                        "score": float(r.score),
-                        "snippet": r.text[:240],
-                    }
-                    for r in retrieved
-                ]
-                st.session_state.ids_chat_messages = [
-                    {"role": "assistant", "content": summary}
-                ]
-            except Exception as e:
-                st.error(f"AI summary generation failed: {e}")
+def render_assistant_page():
+    st.title("Interpretable IDS Assistant")
+    st.caption("Dedicated analyst view with back navigation.")
 
-        if st.session_state.get("ids_summary"):
-            st.info("Initial AI Summary")
-            st.write(st.session_state.ids_summary)
+    c_back, _ = st.columns([1, 6])
+    if c_back.button("← Back to Pipeline"):
+        st.session_state.show_ai_page = False
+        st.rerun()
 
-            with st.expander("RAG Sources Used"):
-                for src in st.session_state.get("ids_sources", []):
-                    st.markdown(
-                        f"- `{src['source']}` (score: {src['score']:.4f})\n\n"
-                        f"  {src['snippet']}..."
-                    )
+    vals = st.session_state.get("pipeline_values", {})
+    times = st.session_state.get("step_times", {})
 
-            st.markdown("#### Follow-up Chat")
-            for msg in st.session_state.get("ids_chat_messages", []):
-                with st.chat_message(msg["role"]):
-                    st.write(msg["content"])
+    if st.session_state.get("current_step", 0) < TOTAL_STEPS:
+        st.warning("Complete all pipeline steps first, then use AI assistant.")
+        return
 
-            user_msg = st.chat_input("Ask follow-up about this alert, evidence, or mitigation")
-            if user_msg:
-                st.session_state.ids_chat_messages.append({"role": "user", "content": user_msg})
-                with st.chat_message("user"):
-                    st.write(user_msg)
+    render_interpretable_assistant_panel(vals, times)
 
-                try:
-                    assistant = load_interpretable_assistant()
-                    llm_context = build_llm_pipeline_context(sample, vals, times)
-                    answer, retrieved = assistant.chat_follow_up(
-                        pipeline_context=llm_context,
-                        chat_history=st.session_state.ids_chat_messages,
-                        user_message=user_msg,
-                    )
-                    st.session_state.ids_chat_messages.append({"role": "assistant", "content": answer})
-                    with st.chat_message("assistant"):
-                        st.write(answer)
 
-                    st.session_state.ids_sources = [
-                        {
-                            "source": r.source,
-                            "score": float(r.score),
-                            "snippet": r.text[:240],
-                        }
-                        for r in retrieved
-                    ]
-                except Exception as e:
-                    st.error(f"AI follow-up failed: {e}")
+if st.session_state.get("show_ai_page", False):
+    render_assistant_page()
+    st.stop()
 
 
 if mode == "Step-by-Step":

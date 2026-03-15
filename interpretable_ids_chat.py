@@ -33,8 +33,38 @@ class InterpretableIDSChat:
         self._chunks: List[Dict[str, str]] = []
         self._vectorizer = None
         self._tfidf_matrix = None
+        self._label_to_file = {
+            "normal": "normal.txt",
+            "fuzzers": "fuzzers.txt",
+            "fuzzer": "fuzzers.txt",
+            "analysis": "analysis.txt",
+            "backdoors": "backdoors.txt",
+            "backdoor": "backdoors.txt",
+            "dos": "dos.txt",
+            "denialofservice": "dos.txt",
+            "exploits": "exploits.txt",
+            "exploit": "exploits.txt",
+            "generic": "generic.txt",
+            "reconnaissance": "reconnaissance.txt",
+            "recon": "reconnaissance.txt",
+            "shellcode": "shellcode.txt",
+            "worms": "worms.txt",
+            "worm": "worms.txt",
+        }
 
         self._load_and_index_knowledge_base()
+
+    def _resolve_expected_file(self, attack_name: str) -> str:
+        label_key = self._normalize_label(attack_name)
+        expected_file = self._label_to_file.get(label_key)
+
+        if expected_file is None and label_key:
+            for known_key, mapped_file in self._label_to_file.items():
+                if known_key in label_key or label_key in known_key:
+                    expected_file = mapped_file
+                    break
+
+        return expected_file
 
     def _load_and_index_knowledge_base(self) -> None:
         if not os.path.isdir(self.kb_dir):
@@ -109,6 +139,38 @@ class InterpretableIDSChat:
             )
         return results
 
+    @staticmethod
+    def _normalize_label(raw_label: str) -> str:
+        cleaned = re.sub(r"[^a-zA-Z]", "", str(raw_label or "").strip().lower())
+        return cleaned
+
+    def retrieve_for_label(self, attack_name: str, query: str, top_k: int = 4) -> List[RetrievedChunk]:
+        expected_file = self._resolve_expected_file(attack_name)
+
+        # If label is known, retrieve ONLY from that class document to avoid class leakage.
+        if expected_file:
+            label_indices = [
+                i
+                for i, ch in enumerate(self._chunks)
+                if ch["source"].lower() == expected_file.lower()
+            ]
+
+            if label_indices:
+                query_vec = self._vectorizer.transform([query])
+                sims = cosine_similarity(query_vec, self._tfidf_matrix[label_indices]).flatten()
+                local_idx = sims.argsort()[::-1][:top_k]
+                return [
+                    RetrievedChunk(
+                        source=self._chunks[label_indices[i]]["source"],
+                        score=float(sims[i]),
+                        text=self._chunks[label_indices[i]]["text"],
+                    )
+                    for i in local_idx
+                ]
+
+        # Unknown label fallback: global retrieval.
+        return self.retrieve(query=query, top_k=top_k)
+
     def _chat_ollama(self, messages: List[Dict[str, str]], temperature: float = 0.2) -> str:
         payload = {
             "model": self.model,
@@ -150,12 +212,17 @@ class InterpretableIDSChat:
     def generate_initial_summary(self, pipeline_context: Dict) -> Tuple[str, List[RetrievedChunk]]:
         attack_name = str(pipeline_context.get("attack_name", "unknown"))
         attack_prob = pipeline_context.get("attack_probability", None)
+        binary_label = str(pipeline_context.get("binary_label", "unknown"))
 
         query = f"{attack_name} intrusion detection behavior indicators mitigation impact"
+        if binary_label == "normal":
+            query = "normal benign traffic baseline behavior interpretation"
         if attack_prob is not None:
             query += f" probability {attack_prob}"
 
-        retrieved = self.retrieve(query, top_k=4)
+        target_label = attack_name if binary_label != "normal" else "normal"
+        expected_file = self._resolve_expected_file(target_label)
+        retrieved = self.retrieve_for_label(attack_name=target_label, query=query, top_k=4)
         kb_text = "\n\n".join(
             [f"[{r.source} | score={r.score:.4f}]\n{r.text}" for r in retrieved]
         )
@@ -164,21 +231,30 @@ class InterpretableIDSChat:
             "You are an IDS security analyst assistant. "
             "Use ONLY the provided pipeline evidence and retrieved RAG knowledge. "
             "Do not hallucinate unsupported facts. "
-            "Write clear, actionable, concise analysis for SOC analysts."
+            "Write clear, actionable, concise analysis for SOC analysts. "
+            "Never change the predicted attack family from pipeline context."
         )
 
         user_prompt = (
-            "Create an interpretable summary for this IDS prediction.\n\n"
+            "Create an interpretable report for this IDS prediction in a concise clinical/security-report style.\n\n"
             "Required sections:\n"
             "1) Final Decision Summary\n"
             "2) Binary and Multiclass Evidence\n"
             "3) SHAP Feature-Based Explanation\n"
             "4) Attack Context From Knowledge Base\n"
             "5) Recommended Next Investigation Steps\n\n"
+            "Interpretation constraints:\n"
+            "- Do not only restate raw values; interpret what they mean for risk.\n"
+            "- Mention top SHAP features explicitly and connect them to sample feature values.\n"
+            "- For normal classification, explain why indicators suggest benign traffic and what to monitor.\n"
+            "- If a feature is notable (example: sttl around high/low extremes), call out its likely relevance.\n"
+            "- Keep attack family consistent with `attack_name` from pipeline context.\n"
+            "- Use clear analyst language and avoid vague statements.\n\n"
             "Pipeline Context:\n"
             f"{self._context_to_text(pipeline_context)}\n\n"
             "Retrieved Knowledge:\n"
-            f"{kb_text}"
+            f"{kb_text}\n\n"
+            f"Expected Knowledge File For This Prediction: {expected_file}"
         )
 
         summary = self._chat_ollama(
@@ -197,7 +273,10 @@ class InterpretableIDSChat:
         chat_history: List[Dict[str, str]],
         user_message: str,
     ) -> Tuple[str, List[RetrievedChunk]]:
-        retrieved = self.retrieve(user_message, top_k=4)
+        attack_name = str(pipeline_context.get("attack_name", "unknown"))
+        binary_label = str(pipeline_context.get("binary_label", "unknown"))
+        target = attack_name if binary_label != "normal" else "normal"
+        retrieved = self.retrieve_for_label(target, user_message, top_k=4)
         kb_text = "\n\n".join(
             [f"[{r.source} | score={r.score:.4f}]\n{r.text}" for r in retrieved]
         )

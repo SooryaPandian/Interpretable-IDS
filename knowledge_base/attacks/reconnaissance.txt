@@ -2,15 +2,29 @@ Attack: Reconnaissance
 Definition:
 Reconnaissance identifies hosts, ports, services, and security posture before active exploitation.
 
+Analyst Interpretation Notes:
+- Reconnaissance is discovery-oriented and usually low-impact by itself.
+- Recon-class evidence should focus on breadth of probing (many hosts/ports) rather than exploit payload depth.
+- If the event is highly targeted with exploit-like payload behavior, classify as exploit instead of recon.
+
 Common Indicators in Network Traffic:
 - Sequential port scanning behavior
 - Host discovery sweeps and DNS enumeration
 - Many short-lived connection attempts
+- Broad destination spread with low per-destination interaction depth
+- Service fingerprinting patterns (banner/metadata probing)
 
 Potential Impact:
 - Increased probability of targeted follow-on attacks
+
+Validation Checks for SOC Teams:
+- Measure destination cardinality and scan velocity across the source entity
+- Compare against approved vulnerability scanners and maintenance windows
+- Verify if probing pattern aligns with known benign inventory tooling
 
 Containment and Response:
 - Block repeated scanners and suspicious netblocks
 - Monitor critical assets for follow-up intrusion attempts
 - Review firewall exposure and segmentation controls
+- Tighten scan detection thresholds for exposed subnets
+- Add watchlist alerts for recurring recon source fingerprints
