@@ -1,0 +1,16 @@
+Attack: Generic
+Definition:
+Generic attacks represent broad cryptographic or protocol abuse patterns not tied to a single exploit family.
+
+Common Indicators in Network Traffic:
+- Repetitive algorithmic traffic signatures
+- High-frequency packet exchanges with low semantic diversity
+- Anomalies crossing multiple protocol contexts
+
+Potential Impact:
+- Disruption, bypass attempts, and broad attack staging
+
+Containment and Response:
+- Tighten anomaly thresholds by segment
+- Enforce protocol validation and baseline policies
+- Investigate adjacent suspicious events for campaign linkage

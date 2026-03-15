@@ -1,0 +1,17 @@
+Attack: Worms
+Definition:
+Worm attacks self-propagate across systems without direct user interaction.
+
+Common Indicators in Network Traffic:
+- Repeated scanning plus rapid connection spread
+- Similar payload patterns across many destinations
+- Exponential growth in suspicious flows
+
+Potential Impact:
+- Fast internal propagation and broad service disruption
+- Secondary payload delivery across the environment
+
+Containment and Response:
+- Enforce network segmentation and emergency ACLs
+- Quarantine infected segments/hosts quickly
+- Patch vulnerable systems and verify remediation coverage

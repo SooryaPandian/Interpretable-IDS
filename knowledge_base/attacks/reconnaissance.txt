@@ -1,0 +1,16 @@
+Attack: Reconnaissance
+Definition:
+Reconnaissance identifies hosts, ports, services, and security posture before active exploitation.
+
+Common Indicators in Network Traffic:
+- Sequential port scanning behavior
+- Host discovery sweeps and DNS enumeration
+- Many short-lived connection attempts
+
+Potential Impact:
+- Increased probability of targeted follow-on attacks
+
+Containment and Response:
+- Block repeated scanners and suspicious netblocks
+- Monitor critical assets for follow-up intrusion attempts
+- Review firewall exposure and segmentation controls

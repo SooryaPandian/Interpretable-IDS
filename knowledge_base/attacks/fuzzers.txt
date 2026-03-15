@@ -1,0 +1,17 @@
+Attack: Fuzzers
+Definition:
+Fuzzing attacks send malformed or random inputs to trigger errors, crashes, or abnormal behavior.
+
+Common Indicators in Network Traffic:
+- High variation in payload patterns and packet sizes
+- Repeated unexpected protocol states
+- Spikes in request volume to edge services
+
+Potential Impact:
+- Service instability
+- Exposure of unhandled exceptions and vulnerabilities
+
+Containment and Response:
+- Rate-limit anomalous sources
+- Capture payload samples for signature engineering
+- Patch input-validation and parser weaknesses

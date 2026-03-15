@@ -1,0 +1,17 @@
+Attack: Backdoors
+Definition:
+Backdoor attacks establish covert persistence channels for unauthorized access.
+
+Common Indicators in Network Traffic:
+- Unexpected outbound callbacks to rare destinations
+- Periodic beaconing behavior
+- Connections to ports/protocols not aligned with baseline
+
+Potential Impact:
+- Long-term unauthorized control
+- Data theft and lateral movement
+
+Containment and Response:
+- Isolate affected hosts immediately
+- Rotate credentials and invalidate tokens
+- Hunt for persistence mechanisms and C2 indicators

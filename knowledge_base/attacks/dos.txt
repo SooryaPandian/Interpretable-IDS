@@ -1,0 +1,17 @@
+Attack: DoS
+Definition:
+Denial-of-Service attacks overwhelm compute, network, or application resources.
+
+Common Indicators in Network Traffic:
+- Sudden high-volume packet or request bursts
+- Resource exhaustion symptoms and latency spikes
+- Repeated protocol-level flood signatures
+
+Potential Impact:
+- Service outage and degraded availability
+- Incident response diversion
+
+Containment and Response:
+- Apply traffic scrubbing and filtering
+- Enable autoscaling and circuit breakers
+- Tune WAF/rate-limit controls and upstream protections

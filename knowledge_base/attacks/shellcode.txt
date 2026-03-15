@@ -1,0 +1,17 @@
+Attack: Shellcode
+Definition:
+Shellcode attacks carry instruction payloads intended to execute commands after successful exploitation.
+
+Common Indicators in Network Traffic:
+- Encoded payload fragments in suspicious contexts
+- NOP-sled-like byte distributions
+- Exploit-like requests followed by command-and-control traffic
+
+Potential Impact:
+- Immediate command execution on target systems
+- Rapid post-exploitation and lateral movement
+
+Containment and Response:
+- Isolate host and capture memory when possible
+- Block indicators and payload signatures
+- Hunt for child process anomalies and persistence artifacts

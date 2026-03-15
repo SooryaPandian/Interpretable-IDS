@@ -3,10 +3,13 @@ import pandas as pd
 import numpy as np
 import shap
 import time
+import os
 import joblib
 import tensorflow as tf
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import LabelEncoder
+
+from interpretable_ids_chat import InterpretableIDSChat
 
 # ------------------------------
 # PAGE CONFIG
@@ -76,6 +79,16 @@ def load_data():
 
 df = load_data()
 
+
+@st.cache_resource
+def load_interpretable_assistant():
+    kb_dir = os.path.join("knowledge_base", "attacks")
+    return InterpretableIDSChat(
+        kb_dir=kb_dir,
+        model="llama3.2:latest",
+        ollama_base_url="http://localhost:11434",
+    )
+
 # ------------------------------
 # SAMPLE SELECTION
 # ------------------------------
@@ -116,11 +129,9 @@ progress = st.progress(0)
 # STEP 1 PREPROCESSING
 # ------------------------------
 
-def preprocessing(sample):
+def transform_features(input_df):
 
-    start = time.time()
-
-    X = sample[selected_features]
+    X = input_df[selected_features]
 
     # --- Encode categorical columns before scaling ---
     X = X.copy()
@@ -171,6 +182,15 @@ def preprocessing(sample):
 
     X_scaled = scaler.transform(X)
 
+    return X_scaled
+
+
+def preprocessing(sample):
+
+    start = time.time()
+
+    X_scaled = transform_features(sample)
+
     runtime = time.time() - start
 
     return X_scaled, runtime
@@ -191,7 +211,7 @@ def dnn_predict(X):
     # binary classifier output
     attack_prob = float(pred[0][0])
 
-    label = 1 if attack_prob > 0.8 else 0
+    label = 1 if attack_prob > 0.85 else 0
 
     runtime = time.time() - start
 
@@ -257,190 +277,402 @@ def attack_classification(cluster, X, emb=None):
 # STEP 6 SHAP
 # ------------------------------
 
+@st.cache_data
+def load_shap_background_data(max_rows=64):
+    # Prefer the larger UNSW file for more representative background;
+    # fall back to demo samples when unavailable.
+    candidate_paths = [
+        "data/UNSW_NB15_testing-set.csv",
+        "data/unsw_test_samples.csv"
+    ]
+
+    bg_df = None
+    for path in candidate_paths:
+        try:
+            temp_df = pd.read_csv(path)
+            bg_df = temp_df
+            break
+        except Exception:
+            continue
+
+    if bg_df is None:
+        raise RuntimeError("Unable to load background data for SHAP explainer.")
+
+    # Ensure expected feature columns exist in-order.
+    bg_df = bg_df.reindex(columns=selected_features)
+    bg_df = bg_df.dropna(how="all")
+
+    if len(bg_df) == 0:
+        raise RuntimeError("Background data has no usable rows for SHAP explainer.")
+
+    if len(bg_df) > max_rows:
+        bg_df = bg_df.sample(n=max_rows, random_state=42)
+
+    return bg_df.reset_index(drop=True)
+
+
+@st.cache_resource
+def load_cached_shap_explainer():
+    bg_df = load_shap_background_data(max_rows=64)
+    bg_scaled = transform_features(bg_df)
+    explainer = shap.DeepExplainer(dnn, bg_scaled)
+    return explainer
+
+
+try:
+    cached_shap_explainer = load_cached_shap_explainer()
+    cached_shap_explainer_error = None
+except Exception as e:
+    cached_shap_explainer = None
+    cached_shap_explainer_error = str(e)
+
 def shap_explain(X):
+    if cached_shap_explainer is None:
+        raise RuntimeError(
+            f"SHAP explainer is not initialized. {cached_shap_explainer_error}"
+        )
 
-    # Convert input to numpy
-    X_np = np.array(X)
+    X_np = np.asarray(X, dtype=float)
+    shap_values = cached_shap_explainer.shap_values(X_np)
 
-    # Wrapper so SHAP receives 1D output
-    def predict_fn(x):
-        return dnn.predict(x, verbose=0).flatten()
+    # Normalize output shape for binary TF model.
+    if isinstance(shap_values, list):
+        shap_arr = np.asarray(shap_values[0])
+    else:
+        shap_arr = np.asarray(shap_values)
 
-    # Small background dataset
-    background = np.zeros((1, X_np.shape[1]))
+    if shap_arr.ndim == 3:
+        shap_arr = shap_arr[:, :, 0]
 
-    explainer = shap.KernelExplainer(predict_fn, background)
+    # Plot top signed contributions for the current sample.
+    sample_vals = shap_arr[0]
+    abs_vals = np.abs(sample_vals)
+    top_k = min(15, len(sample_vals))
+    top_idx = np.argsort(abs_vals)[-top_k:]
+    plot_vals = sample_vals[top_idx]
+    plot_feats = np.array(selected_features)[top_idx]
+    order = np.argsort(np.abs(plot_vals))
 
-    shap_values = explainer.shap_values(X_np)
-
-    # Ensure numpy array
-    shap_values = np.array(shap_values)
-
-    # Build explicit matplotlib figure
-    fig, ax = plt.subplots(figsize=(10,4))
-
-    shap.bar_plot(
-        shap_values[0],
-        feature_names=selected_features,
-        max_display=15
-    )
-
+    fig, ax = plt.subplots(figsize=(10, 5))
+    colors = ["#d62728" if v > 0 else "#1f77b4" for v in plot_vals[order]]
+    ax.barh(plot_feats[order], plot_vals[order], color=colors)
+    ax.axvline(0, color="black", linewidth=1)
+    ax.set_title("SHAP - Top feature contributions (DeepExplainer)")
+    ax.set_xlabel("SHAP value (signed)")
+    ax.grid(axis="x", linestyle="--", alpha=0.35)
     plt.tight_layout()
 
-    return fig
+    top_features = []
+    for feat, val in zip(plot_feats[order], plot_vals[order]):
+        top_features.append({"feature": str(feat), "shap_value": float(val)})
+
+    return fig, top_features
 
 # ------------------------------
 # RUN PIPELINE
 # ------------------------------
 
-if st.button("Run IDS Pipeline"):
+TOTAL_STEPS = 7
+STEP_TITLES = {
+    1: "Data Preprocessing",
+    2: "Intrusion Detection using DNN",
+    3: "Extract Embedding",
+    4: "Identify Cluster",
+    5: "Identify Attack Category",
+    6: "Model Explainability (SHAP)",
+    7: "Runtime Analysis"
+}
 
-    total_start = time.time()
 
-    step_times = {}
+def reset_pipeline_state():
+    st.session_state.current_step = 0
+    st.session_state.pipeline_values = {}
+    st.session_state.step_times = {}
+    st.session_state.ids_summary = None
+    st.session_state.ids_sources = []
+    st.session_state.ids_chat_messages = []
 
-    # ------------------
-    # STEP 1
-    # ------------------
 
-    progress.progress(10)
+def build_llm_pipeline_context(sample_row, vals, times):
+    sample_features = sample_row[selected_features].iloc[0].to_dict()
+    attack_probability = float(vals.get("attack_prob", 0.0))
 
-    st.subheader("Step 1 — Data Preprocessing")
+    context = {
+        "sample_index": int(sample_index),
+        "binary_label": "attack" if int(vals.get("label", 0)) == 1 else "normal",
+        "attack_probability": attack_probability,
+        "cluster": vals.get("cluster", None),
+        "attack_name": vals.get("attack_name", "Normal" if int(vals.get("label", 0)) == 0 else "Unknown"),
+        "attack_code": int(np.asarray(vals["attack"]).item()) if "attack" in vals else None,
+        "step_times": {k: float(v) for k, v in times.items()},
+        "shap_top_features": vals.get("shap_top_features", []),
+        "sample_feature_values": sample_features,
+    }
+    return context
 
-    st.write("Scaling selected features using trained StandardScaler.")
 
-    X_scaled, t = preprocessing(sample)
+if "current_step" not in st.session_state:
+    reset_pipeline_state()
 
-    step_times["Preprocessing"] = t
+if "sample_key" not in st.session_state:
+    st.session_state.sample_key = int(sample_index)
 
-    st.success(f"Completed in {t:.4f} seconds")
+if st.session_state.sample_key != int(sample_index):
+    st.session_state.sample_key = int(sample_index)
+    reset_pipeline_state()
 
-    # ------------------
-    # STEP 2
-    # ------------------
 
-    progress.progress(25)
+def render_up_to_step(step_limit):
+    if step_limit <= 0:
+        return
 
-    st.subheader("Step 2 — Intrusion Detection using DNN")
+    vals = st.session_state.pipeline_values
+    times = st.session_state.step_times
 
-    label, attack_prob, t = dnn_predict(X_scaled)
+    if step_limit >= 1:
+        st.subheader("Step 1 - Data Preprocessing")
+        st.write("Scaling selected features and encoding categorical inputs.")
 
-    st.write(f"Attack probability: {attack_prob:.4f}")
+        if "X_scaled" not in vals:
+            X_scaled, t = preprocessing(sample)
+            vals["X_scaled"] = X_scaled
+            times["Preprocessing"] = t
 
-    step_times["DNN"] = t
+        st.success(f"Completed in {times['Preprocessing']:.4f} seconds")
+        scaled_df = pd.DataFrame(vals["X_scaled"], columns=selected_features)
+        st.caption("Scaled feature preview")
+        st.dataframe(scaled_df.T.rename(columns={0: "scaled_value"}), use_container_width=True)
 
-    if label == 0:
+    if step_limit >= 2:
+        st.subheader("Step 2 - Intrusion Detection using DNN")
 
-        st.success("Traffic classified as **NORMAL**")
+        if "label" not in vals:
+            label, attack_prob, t = dnn_predict(vals["X_scaled"])
+            vals["label"] = label
+            vals["attack_prob"] = attack_prob
+            times["DNN"] = t
 
-    else:
+        c1, c2 = st.columns(2)
+        with c1:
+            st.metric("Attack Probability", f"{vals['attack_prob']:.4f}")
+        with c2:
+            st.metric("DNN Runtime (s)", f"{times['DNN']:.4f}")
 
-        st.error("⚠️ Attack Detected")
+        st.progress(int(max(0.0, min(1.0, vals["attack_prob"])) * 100), text="DNN attack score")
 
-    st.write(f"Runtime: {t:.4f} seconds")
+        if vals["label"] == 0:
+            st.success("Traffic classified as **NORMAL**")
+        else:
+            st.error("Attack detected")
 
-    # ------------------
-    # NORMAL TRAFFIC
-    # ------------------
+    if step_limit >= 3:
+        st.subheader("Step 3 - Extract Embedding")
 
-    if label == 0:
+        if vals.get("label", 0) == 0:
+            st.info("Traffic is normal, so embedding extraction for attack path is skipped.")
+            chart_data = pd.DataFrame(
+                sample[selected_features].values[0],
+                index=selected_features,
+                columns=["Value"]
+            )
+            st.bar_chart(chart_data)
+        else:
+            if "emb" not in vals:
+                emb, t = extract_embeddings(vals["X_scaled"])
+                vals["emb"] = emb
+                times["Embedding"] = t
 
-        progress.progress(60)
+            st.metric("Embedding Runtime (s)", f"{times['Embedding']:.4f}")
+            emb_df = pd.DataFrame(vals["emb"][0][:20], columns=["embedding"])
+            st.caption("First 20 embedding dimensions")
+            st.line_chart(emb_df)
 
-        st.subheader("Normal Traffic Visualization")
+    if step_limit >= 4:
+        st.subheader("Step 4 - Identify Cluster")
 
-        chart_data = pd.DataFrame(
-            sample[selected_features].values[0],
-            index=selected_features,
-            columns=["Value"]
-        )
+        if vals.get("label", 0) == 0:
+            st.info("Traffic is normal, so cluster assignment is skipped.")
+        else:
+            if "cluster" not in vals:
+                cluster, t = cluster_predict(vals["emb"])
+                vals["cluster"] = cluster
+                times["Clustering"] = t
 
-        st.bar_chart(chart_data)
+            c1, c2 = st.columns(2)
+            c1.metric("Cluster", str(vals["cluster"]))
+            c2.metric("Clustering Runtime (s)", f"{times['Clustering']:.4f}")
 
-    # ------------------
-    # ATTACK PIPELINE
-    # ------------------
+    if step_limit >= 5:
+        st.subheader("Step 5 - Identify Attack Category")
 
-    else:
+        if vals.get("label", 0) == 0:
+            st.success("Final category: **Normal** (XGBoost attack classifier skipped).")
+        else:
+            if "attack" not in vals:
+                attack, t = attack_classification(vals["cluster"], vals["X_scaled"], vals["emb"])
+                vals["attack"] = attack
+                times["XGBoost"] = t
 
-        progress.progress(45)
-
-        st.subheader("Step 3 — Extracting Feature Embeddings")
-
-        emb, t = extract_embeddings(X_scaled)
-
-        step_times["Embedding"] = t
-
-        st.write(f"Runtime: {t:.4f} seconds")
-
-        progress.progress(60)
-
-        st.subheader("Step 4 — KMeans Cluster Identification")
-
-        cluster, t = cluster_predict(emb)
-
-        step_times["Clustering"] = t
-
-        st.success(f"Cluster Assigned: **{cluster}**")
-
-        st.write(f"Runtime: {t:.4f} seconds")
-
-        progress.progress(75)
-
-        st.subheader("Step 5 — Cluster-Specific Attack Classification")
-
-        # Pass embeddings along with scaled features so XGBoost receives the same feature layout used in training
-        attack, t = attack_classification(cluster, X_scaled, emb)
-
-        step_times["XGBoost"] = t
-
-        # Map numeric attack code to human-readable label if encoder available
-        try:
-            if attack_label_encoder is not None:
                 try:
-                    attack_name = attack_label_encoder.inverse_transform([int(attack)])[0]
+                    if attack_label_encoder is not None:
+                        vals["attack_name"] = attack_label_encoder.inverse_transform([int(np.asarray(attack).item())])[0]
+                    else:
+                        vals["attack_name"] = f"code: {int(np.asarray(attack).item())}"
                 except Exception:
-                    # if attack is a numpy array or nested, coerce to int
-                    attack_name = attack_label_encoder.inverse_transform([int(np.asarray(attack).item())])[0]
-                st.error(f"Predicted Attack Type: **{attack_name}**")
-            else:
-                st.error(f"Predicted Attack Type (code): **{int(attack)}**")
-        except Exception:
-            st.error(f"Predicted Attack Type (raw): **{attack}**")
+                    vals["attack_name"] = str(attack)
 
-        st.write(f"Runtime: {t:.4f} seconds")
+            c1, c2 = st.columns(2)
+            c1.metric("XGBoost Runtime (s)", f"{times['XGBoost']:.4f}")
+            c2.metric("Cluster Used", str(vals.get("cluster", "N/A")))
+            st.error(f"Predicted Attack Type: **{vals['attack_name']}**")
 
-    # ------------------
-    # SHAP
-    # ------------------
+    if step_limit >= 6:
+        st.subheader("Step 6 - Model Explainability (SHAP)")
 
-    progress.progress(90)
+        if "shap_fig" not in vals and "shap_error" not in vals:
+            shap_start = time.time()
+            try:
+                shap_fig, shap_top_features = shap_explain(vals["X_scaled"])
+                vals["shap_fig"] = shap_fig
+                vals["shap_top_features"] = shap_top_features
+            except Exception as e:
+                vals["shap_error"] = str(e)
+            times["SHAP"] = time.time() - shap_start
 
-    st.subheader("Step 6 — Model Explainability (SHAP)")
+        if "shap_fig" in vals:
+            st.pyplot(vals["shap_fig"])
+        else:
+            st.error(f"SHAP explanation failed: {vals.get('shap_error', 'unknown error')}")
 
-    try:
-        shap_fig = shap_explain(X_scaled)
-        st.pyplot(shap_fig)
-    except Exception as e:
-        st.error(f"SHAP explanation failed: {e}")
+        if "SHAP" in times:
+            st.caption(f"SHAP Runtime: {times['SHAP']:.4f} seconds")
 
-    # ------------------
-    # RUNTIME
-    # ------------------
+    if step_limit >= 7:
+        st.subheader("Step 7 - Runtime Analysis")
 
-    progress.progress(100)
+        runtime_df = pd.DataFrame({
+            "Step": list(times.keys()),
+            "Time (seconds)": list(times.values())
+        })
+        st.dataframe(runtime_df, use_container_width=True)
 
-    total_runtime = time.time() - total_start
+        total_runtime = float(np.sum(list(times.values()))) if len(times) > 0 else 0.0
+        st.metric("Total Pipeline Runtime", f"{total_runtime:.4f} seconds")
+        st.success("Pipeline execution completed")
 
-    st.subheader("Runtime Analysis")
+        st.markdown("### Interpretable IDS Assistant (RAG + Ollama)")
+        st.caption("Generate an AI summary only when needed, then ask follow-up questions interactively.")
 
-    runtime_df = pd.DataFrame({
-        "Step": step_times.keys(),
-        "Time (seconds)": step_times.values()
-    })
+        c_sum, c_clear = st.columns([1, 1])
+        generate_summary_clicked = c_sum.button("Generate AI Summary", type="primary")
+        clear_chat_clicked = c_clear.button("Clear AI Chat")
 
-    st.dataframe(runtime_df)
+        if clear_chat_clicked:
+            st.session_state.ids_summary = None
+            st.session_state.ids_sources = []
+            st.session_state.ids_chat_messages = []
+            st.rerun()
 
-    st.metric("Total Pipeline Runtime", f"{total_runtime:.4f} seconds")
+        if generate_summary_clicked:
+            try:
+                assistant = load_interpretable_assistant()
+                llm_context = build_llm_pipeline_context(sample, vals, times)
+                summary, retrieved = assistant.generate_initial_summary(llm_context)
 
-    st.success("Pipeline Execution Completed")
+                st.session_state.ids_summary = summary
+                st.session_state.ids_sources = [
+                    {
+                        "source": r.source,
+                        "score": float(r.score),
+                        "snippet": r.text[:240],
+                    }
+                    for r in retrieved
+                ]
+                st.session_state.ids_chat_messages = [
+                    {"role": "assistant", "content": summary}
+                ]
+            except Exception as e:
+                st.error(f"AI summary generation failed: {e}")
+
+        if st.session_state.get("ids_summary"):
+            st.info("Initial AI Summary")
+            st.write(st.session_state.ids_summary)
+
+            with st.expander("RAG Sources Used"):
+                for src in st.session_state.get("ids_sources", []):
+                    st.markdown(
+                        f"- `{src['source']}` (score: {src['score']:.4f})\n\n"
+                        f"  {src['snippet']}..."
+                    )
+
+            st.markdown("#### Follow-up Chat")
+            for msg in st.session_state.get("ids_chat_messages", []):
+                with st.chat_message(msg["role"]):
+                    st.write(msg["content"])
+
+            user_msg = st.chat_input("Ask follow-up about this alert, evidence, or mitigation")
+            if user_msg:
+                st.session_state.ids_chat_messages.append({"role": "user", "content": user_msg})
+                with st.chat_message("user"):
+                    st.write(user_msg)
+
+                try:
+                    assistant = load_interpretable_assistant()
+                    llm_context = build_llm_pipeline_context(sample, vals, times)
+                    answer, retrieved = assistant.chat_follow_up(
+                        pipeline_context=llm_context,
+                        chat_history=st.session_state.ids_chat_messages,
+                        user_message=user_msg,
+                    )
+                    st.session_state.ids_chat_messages.append({"role": "assistant", "content": answer})
+                    with st.chat_message("assistant"):
+                        st.write(answer)
+
+                    st.session_state.ids_sources = [
+                        {
+                            "source": r.source,
+                            "score": float(r.score),
+                            "snippet": r.text[:240],
+                        }
+                        for r in retrieved
+                    ]
+                except Exception as e:
+                    st.error(f"AI follow-up failed: {e}")
+
+
+if mode == "Step-by-Step":
+    st.sidebar.markdown("### Step Controls")
+    next_step_clicked = st.sidebar.button("⏭️ Next", help="Run next step")
+    go_end_clicked = st.sidebar.button("⏩ Go End", help="Run all remaining steps")
+    reset_clicked = st.sidebar.button("🔄 Reset", help="Reset current sample run")
+
+    current_label = STEP_TITLES.get(st.session_state.current_step, "Not started")
+    st.sidebar.caption(f"Current step: {st.session_state.current_step}/{TOTAL_STEPS}")
+    st.sidebar.caption(current_label)
+
+    if reset_clicked:
+        reset_pipeline_state()
+        st.rerun()
+
+    if go_end_clicked:
+        st.session_state.current_step = TOTAL_STEPS
+    elif next_step_clicked and st.session_state.current_step < TOTAL_STEPS:
+        st.session_state.current_step += 1
+
+    progress.progress(int((st.session_state.current_step / TOTAL_STEPS) * 100))
+    render_up_to_step(st.session_state.current_step)
+
+else:
+    st.sidebar.markdown("### Run Controls")
+    run_all_clicked = st.sidebar.button("▶️ Run IDS Pipeline")
+    reset_all_clicked = st.sidebar.button("🔄 Reset")
+
+    if reset_all_clicked:
+        reset_pipeline_state()
+        st.rerun()
+
+    if run_all_clicked:
+        st.session_state.current_step = TOTAL_STEPS
+
+    progress.progress(int((st.session_state.current_step / TOTAL_STEPS) * 100))
+    render_up_to_step(st.session_state.current_step)

@@ -1,0 +1,17 @@
+Attack: Analysis
+Definition:
+Analysis activity typically represents reconnaissance or probing intended to map services and find weak points.
+
+Common Indicators in Network Traffic:
+- Repeated low-volume probes across multiple destinations
+- Distinctive scan-like timing patterns
+- Connection attempts to uncommon service combinations
+
+Potential Impact:
+- Pre-attack intelligence gathering
+- Increased risk of follow-on exploitation
+
+Containment and Response:
+- Correlate with vulnerability scans and host logs
+- Block or throttle probing origins
+- Increase monitoring around discovered targets
